@@ -1,0 +1,54 @@
+dataset:
+  root_path: "D:/dataset"
+  expected_folders: [pdt_01-08, pdt_09_17, Z24ems1, Z24ems2, Z24ems3]
+  extensions: [.aaa, .mat, .csv, .txt]
+  include_archive_members: true
+  max_files: null
+  sampling_rate: null
+  # Evidence: KU Leuven Z24 benchmark scenario table and included PDT reports.
+  # REFERENCE includes original/reference or restored-reference measurements.
+  # ALTERED_CONDITION includes deliberately modified progressive-test states;
+  # it does not mean the bridge was unsafe.
+  label_rules:
+    'pdt_[^\\/]+[\\/](?:01|02|08)[\\/]': REFERENCE
+    'pdt_[^\\/]+[\\/](?:03|04|05|06|07|09|10|11|12|13|14|15|16|17)[\\/]': ALTERED_CONDITION
+preprocessing:
+  detrend: true
+  filter_enabled: false
+  filter_type: bandpass
+  low_cutoff: 0.5
+  high_cutoff: 40.0
+  filter_order: 4
+  normalization: standard
+window:
+  size_seconds: 10
+  fallback_size_samples: 1000
+  overlap: 0.5
+bocpd:
+  feature: rms
+  hazard_rate: 0.01
+  threshold: 0.80
+  max_run_length: 500
+model:
+  algorithm: xgboost
+  n_estimators: 300
+  learning_rate: 0.05
+  max_depth: 6
+  subsample: 0.8
+  colsample_bytree: 0.8
+  eval_metric: logloss
+  random_state: 42
+  test_size: 0.25
+  min_samples_for_training: 20
+risk:
+  bocpd_weight: 0.3
+  ml_weight: 0.5
+  attribution_weight: 0.2
+  thresholds: {medium: 0.35, high: 0.60, critical: 0.80}
+dashboard:
+  refresh_interval: 1.0
+  playback_speed: 1.0
+paths:
+  processed: data/processed
+  models: models
+  results: results

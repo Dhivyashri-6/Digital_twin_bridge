@@ -1,0 +1,383 @@
+DIGITAL TWIN BRIDGE: PROJECT AND PUBLICATION OVERVIEW
+=====================================================
+
+1. EXECUTIVE SUMMARY
+
+Digital Twin Bridge is a research prototype for explainable structural health monitoring (SHM) of the Z24 bridge benchmark. Its implemented workflow is:
+
+raw signal files -> loading and metadata preservation -> preprocessing and windowing
+-> vibration feature extraction -> BOCPD change detection
+-> optional XGBoost condition classification -> SHAP attribution
+-> sensor prioritisation and risk aggregation -> Streamlit monitoring replay
+
+The system addresses four questions:
+
+1. What data are available? Dataset inspection and format-aware loading provide source metadata and signal statistics.
+2. When did signal behaviour change? Bayesian Online Change Point Detection (BOCPD) analyses sequential RMS features.
+3. What configured condition does a window resemble? A grouped, leakage-aware XGBoost classifier can be trained when explicit labels are available.
+4. Why did the model make that prediction? SHAP feature attribution and sensor-level aggregation support engineering review.
+
+The project is an explainable monitoring and decision-support prototype. It is not a live IoT system, a safety certification tool, a damage diagnosis system, or a physics-calibrated digital twin.
+
+2. RESEARCH PROBLEM AND MOTIVATION
+
+Bridge SHM systems must transform high-volume vibration measurements into information that an engineer can inspect. This project combines detection, condition assessment, interpretability, and visual communication rather than reporting a single opaque score.
+
+Implemented capabilities include:
+
+- ingestion of heterogeneous Z24 signal files;
+- configurable preprocessing and overlapping signal windows;
+- time-domain and frequency-domain vibration descriptors;
+- unsupervised sequential change detection with BOCPD;
+- optional supervised classification with recording-grouped evaluation;
+- model explanations with SHAP;
+- transparent risk aggregation;
+- a visual monitoring twin with historical replay controls.
+
+The central research proposition is an integrated analytics workflow, not a claim that any one algorithm independently solves bridge damage identification.
+
+3. MAIN CONTRIBUTIONS
+
+The repository implements the following contributions that can be presented in a paper:
+
+1. A modular end-to-end SHM workflow connecting signal ingestion, feature engineering, change detection, classification, explanation, and visualisation.
+2. A format-aware loader for Z24-style .aaa, .mat, .csv, .txt, and optional ZIP-contained records, preserving scenario, setup, sensor, recording, channel, and source-file metadata.
+3. A leakage-aware supervised-learning path using recording-grouped train/test splitting so overlapping windows from one recording are not randomly distributed between both partitions.
+4. A transparent risk formulation combining change probability, abnormal-condition probability, and model attribution when those components are available.
+5. A monitoring interface exposing RMS trends, BOCPD probabilities, sensor rankings, classifier probabilities, SHAP rankings, event logs, and a schematic bridge view.
+6. Explicit scope statements separating statistical change, model attribution, prototype risk, and physical structural damage.
+
+4. SYSTEM ARCHITECTURE
+
+Processing stages:
+
+Configuration       config.yaml, src/utils.py                 YAML settings -> resolved paths
+Inspection          src/dataset_inspector.py                 dataset -> report and signal plot
+Loading             src/data_loader.py                        files/archives -> SignalRecord objects
+Preprocessing       src/preprocessing.py                      records -> overlapping signal windows
+Features            src/feature_extraction.py                windows -> feature table
+Change detection   src/bocpd.py                              RMS sequences -> change probabilities
+Label assignment   scripts/run_pipeline.py                   paths and regex -> configured labels
+Classification      src/model_training.py                    labelled features -> XGBoost and metrics
+Prediction          src/model_prediction.py                  saved model -> classes and probabilities
+Explainability      src/shap_analysis.py                     model -> SHAP tables
+Sensor mapping      src/sensor_mapping.py                    SHAP -> sensor importance ranking
+Risk aggregation    src/risk_engine.py                       indicators -> risk level
+Visualisation       src/digital_twin.py, app.py              artifacts -> dashboard and schematic
+
+End-to-end flow:
+
+load_dataset() discovers files and creates SignalRecord objects. Each record is validated, repaired, detrended, optionally filtered, normalised, and divided into overlapping SignalWindow objects. extract_features() converts each window into one row of features.csv.
+
+The feature table is passed independently to BOCPD and, when valid labels and grouping information exist, to XGBoost. BOCPD results are stored in bocpd_results.csv. The model produces predictions and metrics; SHAP produces feature and local attribution tables. Sensor importance is derived by aggregating attribution by sensor identifier. The pipeline writes prototype risk rows, while the dashboard can additionally combine saved BOCPD, XGBoost, and sensor-importance values.
+
+5. MODULE INVENTORY
+
+src/data_loader.py
+------------------
+Defines SignalRecord and raw-data ingestion functions.
+
+- Validates the external dataset root and expected folders.
+- Discovers supported extensions and optional ZIP archives recursively.
+- Parses ASCII-like files using whitespace, comma, or semicolon delimiters.
+- Recognises the common Z24 single-column header containing sample count and sample interval.
+- Loads numerical arrays from MATLAB files, including supported nested structures.
+- Reads .aaa, .csv, and .txt files directly and archive members in memory.
+- Infers scenario, setup, sensor, and recording identifiers.
+- Converts one- and two-dimensional arrays into channel-level SignalRecord objects.
+- Records loading failures while continuing through other files.
+
+MATLAB v7.3/HDF5 files require conversion or an HDF5-capable loader; that path is not implemented here.
+
+src/preprocessing.py
+--------------------
+Defines SignalWindow and signal preparation.
+
+- Validates minimum signal length and finite values.
+- Repairs NaN and infinite samples by linear interpolation.
+- Applies optional linear detrending.
+- Supports optional Butterworth low-pass, high-pass, or band-pass filtering.
+- Supports standard or min-max normalisation.
+- Uses duration-based windows when sampling rate is known, otherwise a sample fallback.
+- Generates overlapping windows while preserving source metadata.
+
+Default configuration: 10-second windows, 50% overlap, standardisation, and filtering disabled.
+
+src/feature_extraction.py
+-------------------------
+Computes window-level time, statistical, and spectral descriptors:
+
+- mean, standard deviation, variance, RMS;
+- minimum, maximum, absolute peak, peak-to-peak;
+- crest factor, skewness, and kurtosis;
+- dominant frequency, spectral energy, frequency centroid, spectral bandwidth, and PSD peak;
+- four Nyquist-bounded band-energy values.
+
+Welch's method is used for power spectral density. Numeric feature selection excludes identifiers, timestamps, and window coordinates.
+
+src/bocpd.py
+------------
+Implements a Student-t Bayesian Online Change Point Detector based on the Adams-MacKay run-length formulation.
+
+For an observation x_t, the detector maintains a posterior distribution over run length r_t. With constant hazard h, growth and reset probabilities are updated using a conjugate Normal-Gamma predictive model. The change probability is the posterior mass at run length zero:
+
+P(r_t = 0 | x_1:t)
+
+The implementation normalises each feature sequence per sensor and recording, processes groups independently, uses RMS by default, bounds the run-length state by max_run_length, and emits the most probable run length and threshold decision.
+
+BOCPD identifies statistical distribution changes. A threshold crossing is not proof of damage.
+
+src/model_training.py
+---------------------
+Provides label validation and XGBoost training.
+
+- Rejects missing, unknown, or single-class labels.
+- Selects numeric vibration features only.
+- Chooses a grouping field from recording, source file, scenario, or setup.
+- Uses GroupShuffleSplit to reduce leakage from overlapping windows.
+- Applies median imputation in a scikit-learn pipeline.
+- Trains XGBClassifier with configured tree count, learning rate, depth, and subsampling.
+- Stores label encoder classes on the fitted pipeline.
+- Writes the model, feature list, accuracy, classification report, confusion matrix, and ROC-AUC where valid.
+
+The labels are configuration-derived path categories, not independently verified physical damage labels.
+
+src/model_prediction.py
+-----------------------
+Loads the serialized pipeline and feature list, verifies required columns, and returns decoded classes, class probabilities, and confidence values.
+
+src/shap_analysis.py
+--------------------
+Uses SHAP TreeExplainer on the XGBoost classifier after applying the pipeline imputer.
+
+- Computes global mean absolute attribution per feature.
+- Computes one local explanation for the final analysed row.
+- Labels attribution direction as toward or away from the target class.
+- Writes global_feature_importance.csv and local_explanation.csv.
+
+SHAP explains trained-model behaviour; it does not establish physical causality.
+
+src/sensor_mapping.py
+---------------------
+Maps feature names to sensor identifiers with regular expressions and aggregates absolute SHAP importance into a ranked sensor table. This is review prioritisation, not geometric damage localisation.
+
+src/risk_engine.py
+------------------
+Computes the weighted score:
+
+R = (w_b B + w_m M + w_a A) / (w_b + w_m + w_a)
+
+B is BOCPD change probability, M is abnormal-condition probability, and A is normalised attribution. Default weights are 0.3, 0.5, and 0.2. Thresholds map the score to LOW, MEDIUM, HIGH, or CRITICAL.
+
+The score is prototype decision support. In the current pipeline script, risk export passes BOCPD only and leaves ML and attribution unset; the dashboard can combine all three when saved artifacts are available.
+
+src/digital_twin.py
+-------------------
+Creates a Plotly schematic bridge deck, piers, and sensor markers. Sensor positions are evenly distributed along the deck using synthetic coordinates. Status colours represent NORMAL, WARNING, and ANOMALY.
+
+This is a visual monitoring twin, not a physics-based bridge model or verified engineering-coordinate system.
+
+src/dataset_inspector.py
+------------------------
+Inspects file types, archive members, variables, shapes, numeric ranges, missing values, infinite values, inferred metadata, and signal lengths. It writes a JSON report and a representative signal plot without modifying the source dataset.
+
+src/realtime_simulator.py
+-------------------------
+Provides a stateful iterator with start, pause, stop, reset, next-window, and finished operations. The current dashboard implements equivalent replay logic through Streamlit session state.
+
+src/utils.py and src/__init__.py
+--------------------------------
+utils.py loads YAML safely, resolves relative paths, creates output directories, and serialises NumPy/Pandas-compatible values to JSON. src/__init__.py identifies the package and declares version 1.0.0.
+
+6. COMMAND-LINE SCRIPTS
+
+scripts/inspect_dataset.py
+  Inspects external data. Outputs results/reports/inspection_report.json and a representative plot.
+
+scripts/preprocess_dataset.py
+  Loads, preprocesses, and windows records. Outputs data/processed/windows_manifest.json.
+
+scripts/extract_features.py
+  Creates the window-level feature table data/processed/features.csv.
+
+scripts/run_bocpd.py
+  Runs BOCPD on saved features and writes data/processed/bocpd_results.csv.
+
+scripts/train_model.py
+  Trains grouped XGBoost and writes the model, feature list, and metrics.
+
+scripts/generate_shap.py
+  Generates SHAP tables and data/processed/sensor_importance.csv.
+
+scripts/plot_vibration_changes.py
+  Plots feature behaviour and change points to results/figures/vibration_change_points.png.
+
+scripts/run_pipeline.py
+  Executes inspection, loading, preprocessing, feature extraction, label assignment, BOCPD, optional model/SHAP processing, and risk export.
+
+Typical commands:
+
+python scripts/inspect_dataset.py
+python scripts/run_pipeline.py --max-files 17
+python scripts/train_model.py
+python scripts/generate_shap.py
+streamlit run app.py
+pytest -q
+
+The raw dataset is external and must be configured through dataset.root_path or --dataset-root. ZIP members are enabled with --archives.
+
+7. CONFIGURATION AND EXPERIMENTAL PARAMETERS
+
+The main defaults in config.yaml are:
+
+- Dataset formats: .aaa, .mat, .csv, .txt; optional archives.
+- Sampling rate: null, so fallback behaviour may apply.
+- Linear detrending: enabled.
+- Filtering: disabled by default; band-pass settings 0.5-40 Hz when enabled.
+- Window: 10 seconds when rate is known; 1,000 samples otherwise.
+- Overlap: 50%.
+- BOCPD feature: RMS.
+- BOCPD hazard: 0.01.
+- BOCPD threshold: 0.80.
+- Maximum run length: 500.
+- XGBoost: 300 trees, learning rate 0.05, depth 6.
+- Split: 25% grouped holdout, random state 42.
+- Risk weights: BOCPD 0.3, ML 0.5, attribution 0.2.
+- Risk thresholds: 0.35 medium, 0.60 high, 0.80 critical.
+
+Current label rules map scenarios 01, 02, and 08 to REFERENCE, and scenarios 03-07 and 09-17 to ALTERED_CONDITION. The software applies these rules to source paths; it does not infer engineering meaning from scenario numbers.
+
+8. REPOSITORY ARTIFACTS
+
+Source and configuration:
+
+- app.py: Streamlit dashboard and historical replay.
+- config.yaml: experiment and path configuration.
+- requirements.txt: Python dependencies.
+- src/: reusable implementation modules.
+- scripts/: command-line workflow stages.
+- tests/: unit and focused integration tests.
+- docs/: architecture, methodology, and limitations notes.
+
+Generated data and results:
+
+- data/processed/features.csv: window-level features and metadata.
+- data/processed/bocpd_results.csv: BOCPD probabilities and run lengths.
+- data/processed/risk_results.csv: exported prototype risk rows.
+- data/processed/label_mapping.json: label patterns and match counts.
+- data/processed/sensor_importance.csv: ranked sensor attribution.
+- models/xgboost.pkl: fitted model when training succeeds.
+- models/feature_columns.json: model input contract.
+- results/reports/inspection_report.json: dataset inspection report.
+- results/metrics/model_metrics.json: classifier metrics.
+- results/metrics/model_status.json: reason training was skipped when applicable.
+- results/shap/global_feature_importance.csv: global SHAP rankings.
+- results/shap/local_explanation.csv: local SHAP contributions.
+- results/figures/: dataset and vibration plots.
+
+Raw Z24 data is intentionally not committed to the repository.
+
+9. TESTING AND VERIFICATION
+
+The test suite covers:
+
+- Z24-style ASCII header parsing and malformed-row handling;
+- MATLAB array loading;
+- invalid-value repair and standardisation;
+- window count and metadata preservation;
+- zero-safe feature extraction;
+- BOCPD probability bounds and grouped execution;
+- sensor-ID extraction and attribution aggregation;
+- risk threshold mapping;
+- rejection of missing or unusable labels;
+- grouped XGBoost training;
+- optional SHAP computation.
+
+The suite does not currently provide full end-to-end validation for the Streamlit interface, archive-scale ingestion, label-rule coverage, filtering, plot CLI behaviour, artifact provenance, or run-to-run reproducibility.
+
+10. CURRENT RESULTS AND INTERPRETATION
+
+The checked-in generated artifacts indicate a large feature table, BOCPD results, a trained XGBoost model, SHAP tables, and inspection outputs. They also indicate that outputs were produced by more than one run or configuration: model_status.json reports a skipped supervised stage while a model and SHAP outputs are present. The repository does not currently store run IDs, configuration hashes, dataset fingerprints, or timestamps linking artifacts into one immutable experiment.
+
+The saved classifier metrics should be reported cautiously. Observed accuracy is approximately 0.50 and ROC-AUC approximately 0.49, close to random binary discrimination for the inspected artifact. This supports the statement that the pipeline can execute classification and explanation stages, not that it reliably identifies structural condition.
+
+The checked-in BOCPD output contains no crossings of the configured 0.80 threshold, although probability variation remains visible below the threshold. This is evidence about the selected data, parameters, and run; it is not evidence that the bridge has no damage.
+
+11. LIMITATIONS RELEVANT TO A PAPER
+
+1. External data dependency: raw data, acquisition conditions, and complete provenance are outside the repository.
+2. Sampling-rate uncertainty: the configured sampling rate is null for the inspected run. Spectral calculations may therefore use the 1 Hz fallback, with an effective 0.5 Hz Nyquist limit and potentially uninformative high-frequency bands.
+3. Label validity: path-based REFERENCE and ALTERED_CONDITION labels are configured categories, not independently verified damage annotations.
+4. Statistical versus physical change: BOCPD detects changes in feature distributions and cannot identify damage by itself.
+5. Weak current classification evidence: the saved classifier performance is near random and should not be used as a reliability claim.
+6. Validation scope: grouped window splitting reduces overlap leakage but is not independent bridge-level validation.
+7. Risk inconsistency: the methodology defines a three-component risk score, while pipeline export currently supplies BOCPD alone.
+8. Attribution interpretation: SHAP indicates model contribution, not causation.
+9. Sensor localisation: sensor aggregation prioritises review but does not infer a physical damage location.
+10. Schematic geometry: displayed sensor coordinates are synthetic unless verified coordinates are supplied.
+11. Replay only: the dashboard simulates historical streaming and has no live acquisition, broker, edge deployment, or IoT integration.
+12. No physics-based twin: no finite-element model, calibrated state estimator, or mechanics-informed digital representation is implemented.
+
+12. RECOMMENDED PAPER STRUCTURE
+
+Abstract:
+State the SHM motivation, integrated workflow, Z24 benchmark, BOCPD/XGBoost/SHAP combination, and prototype nature of the monitoring interface. Avoid claiming validated damage diagnosis.
+
+Introduction:
+Motivate interpretable monitoring, distinguish anomaly detection from damage diagnosis, and identify the need to combine statistical evidence with model explanations and engineering review.
+
+Related Work:
+Discuss vibration-based SHM, Bayesian online change detection, tree-based condition classification, explainable AI for SHM, and digital-twin interfaces.
+
+Materials and Dataset:
+Describe the Z24 benchmark, file formats, scenarios, sensor metadata, acquisition context, label-rule provenance, and external raw-data location.
+
+Methods:
+Describe ingestion, preprocessing, windowing, the 24-feature representation, BOCPD equations and parameters, grouped XGBoost evaluation, SHAP, sensor aggregation, and prototype risk.
+
+System Implementation:
+Map methods to modules and scripts. Include artifact paths and the Streamlit historical replay interface.
+
+Experimental Protocol:
+Report dataset selection, sampling rate, file/archive options, maximum files, configuration revision, random seed, grouping field, and artifact-generation order. Add run IDs and configuration hashes before strong reproducibility claims.
+
+Results:
+Report detection probabilities and threshold crossings, classification metrics with confusion matrix and class balance, SHAP rankings, sensor rankings, and runtime/resource usage. Separate descriptive results from physical-damage claims.
+
+Discussion:
+Explain how complementary outputs support review, why attribution improves transparency, and why statistical evidence requires engineering corroboration.
+
+Limitations and Future Work:
+Include live sensing, physics-based modelling, verified coordinates, better labels, bridge-level validation, sensor fusion, calibrated thresholds, and provenance tracking.
+
+Reproducibility Statement:
+List Python version, dependency versions, configuration, dataset location/version, selected files, random seed, output hashes, and exact generation commands.
+
+13. PUBLICATION-SAFE CLAIM LANGUAGE
+
+Prefer:
+
+- The system detects statistical changes in vibration-derived features.
+- The classifier provides a configured-condition estimate under a grouped holdout protocol.
+- SHAP identifies features that contribute to model predictions.
+- The dashboard supports historical replay and engineering review.
+- The prototype risk score integrates available analytical indicators.
+
+Avoid:
+
+- The system proves structural damage.
+- The health score certifies bridge safety.
+- SHAP identifies the physical cause of damage.
+- The dashboard is a live digital twin.
+- The current classifier is reliable without new, independently validated evidence.
+
+14. RECOMMENDED NEXT STEPS BEFORE SUBMISSION
+
+1. Capture dataset fingerprint, configuration snapshot, dependency lockfile, run ID, timestamp, and output hashes for every experiment.
+2. Resolve and document the true sampling rate before interpreting frequency features or band energies.
+3. Reconcile risk_results.csv with the stated three-component risk method, or document BOCPD-only mode explicitly.
+4. Evaluate against bridge-level or recording-level independent test data and report class balance and confidence intervals.
+5. Validate label semantics against benchmark documentation and distinguish progressive test states from confirmed damage.
+6. Add end-to-end tests for the pipeline and dashboard data contracts.
+7. Supply verified sensor coordinates or name the visual output consistently as a schematic.
+8. Regenerate all committed artifacts in one clean, documented run before using them in paper tables or figures.
