@@ -15,12 +15,14 @@
   "frequency_centroid",
   "spectral_bandwidth",
   "psd_peak",
-  "band_energy_0_0.5hz",
-  "band_energy_1_0.5hz",
-  "band_energy_5_0.5hz",
-  "band_energy_20_0.5hz",
   "band_energy_0_1hz",
   "band_energy_1_5hz",
   "band_energy_5_20hz",
-  "band_energy_20_40hz"
+  "band_energy_20_40hz",
+  "f1",
+  "f2",
+  "f3",
+  "f4",
+  "zeta1",
+  "zeta2"
 ]

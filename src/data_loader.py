@@ -134,11 +134,19 @@ def infer_metadata(path: str | Path, dataset_root: str | Path | None = None) -> 
     parts = path.parts
     rel_parts = path.relative_to(Path(dataset_root)).parts if dataset_root and path.is_relative_to(Path(dataset_root)) else parts
     scenario = next((p for p in rel_parts if re.fullmatch(r"\d{1,3}", p)), "unknown")
+    test = next((p.lower() for p in rel_parts if p.lower() in {"avt", "fvt"}), "na")
     setup_match = re.search(r"setup\s*0*(\d+)", path.stem, re.I)
-    setup = setup_match.group(1) if setup_match else next((p for p in rel_parts if p.lower() in {"avt", "fvt"}), "unknown")
+    # Z24 ASCII layout: <scenario>/<test>/<setup>/<sensor>.aaa
+    folder_setup = path.parent.name if re.fullmatch(r"\d{1,2}", path.parent.name) and path.parent.name != scenario else None
+    setup = f"{int(setup_match.group(1)):02d}" if setup_match else (f"{int(folder_setup):02d}" if folder_setup else "unknown")
     sensor_match = re.search(r"(?:sensor|ch(?:annel)?|acc)?[_-]?(\d{1,3})(?:[xyzv])?$", path.stem, re.I)
     sensor = sensor_match.group(1) if sensor_match else path.stem
-    return {"scenario": scenario, "setup": setup, "sensor": sensor, "recording": path.stem, "label": "unknown"}
+    if folder_setup:  # per-channel ASCII file: the stem is the Z24 channel name (e.g. 100V)
+        sensor = path.stem.upper()
+    # Unique recording ID: scenario + test + setup (+ file stem when no setup can be parsed).
+    recording = f"S{scenario}_{test}_setup{setup}" if setup != "unknown" else f"S{scenario}_{test}_{path.stem}"
+    return {"scenario": scenario, "setup": setup, "sensor": sensor, "recording": recording, "label": "unknown",
+            "channel": path.stem}
 
 
 def _records_from_array(array: np.ndarray, metadata: dict, source: str, sampling_rate: float | None, variable: str) -> list[SignalRecord]:
@@ -155,6 +163,7 @@ def _records_from_array(array: np.ndarray, metadata: dict, source: str, sampling
     records = []
     for i, sig in enumerate(channels):
         fields = dict(metadata)
+        fields.pop("channel", None)
         fields["sensor"] = metadata["sensor"] if len(channels) == 1 else f"{metadata['sensor']}_{i}"
         records.append(SignalRecord(**fields, signal=np.asarray(sig), sampling_rate=sampling_rate, source_file=source,
                                     channel=f"{variable}:{i}", metadata={"variable": variable}))
@@ -170,6 +179,18 @@ def load_file(path: str | Path, dataset_root: str | Path | None = None, fallback
         return _records_from_array(data, metadata, str(path), rate, "ascii")
     if path.suffix.lower() == ".mat":
         records = []
+        try:  # Z24 layout: data (n_samples x n_channels) with channel names in labelshulp
+            raw = loadmat(path, squeeze_me=True, variable_names=["data", "labelshulp"])
+            labels = [str(s).strip().upper() for s in np.atleast_1d(raw.get("labelshulp", []))]
+            data = np.asarray(raw.get("data"), dtype=float) if "data" in raw else None
+        except Exception:
+            labels, data = [], None
+        if data is not None and data.ndim == 2 and len(labels) == data.shape[1]:
+            for i, label in enumerate(labels):
+                fields = dict(metadata, sensor=label, channel=label)
+                records.append(SignalRecord(**fields, signal=data[:, i], sampling_rate=fallback_sampling_rate,
+                                            source_file=str(path), metadata={"variable": f"data:{i}"}))
+            return records
         for variable, array in load_mat_file(path).items():
             if array.size >= 8:
                 records.extend(_records_from_array(array, metadata, str(path), fallback_sampling_rate, variable))

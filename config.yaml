@@ -1,10 +1,14 @@
 dataset:
-  root_path: "D:/dataset"
+  # The raw Z24 data lives inside the project folder on this machine (D:\dataset does not exist).
+  root_path: "D:/Digital_twin_bridge/dataset"
   expected_folders: [pdt_01-08, pdt_09_17, Z24ems1, Z24ems2, Z24ems3]
   extensions: [.aaa, .mat, .csv, .txt]
   include_archive_members: true
   max_files: null
-  sampling_rate: null
+  # Z24 PDT: every .aaa header declares a sample interval of 0.010000 s (100 Hz), and the
+  # .aaa channels of scenarios 06/17 are sample-for-sample identical to the .mat columns.
+  sampling_rate: 100
+  reference_scenarios: [1, 2, 8]
   # Evidence: KU Leuven Z24 benchmark scenario table and included PDT reports.
   # REFERENCE includes original/reference or restored-reference measurements.
   # ALTERED_CONDITION includes deliberately modified progressive-test states;
@@ -14,21 +18,48 @@ dataset:
     'pdt_[^\\/]+[\\/](?:03|04|05|06|07|09|10|11|12|13|14|15|16|17)[\\/]': ALTERED_CONDITION
 preprocessing:
   detrend: true
-  filter_enabled: false
+  filter_enabled: true
   filter_type: bandpass
   low_cutoff: 0.5
   high_cutoff: 40.0
   filter_order: 4
-  normalization: standard
+  # Per-record z-score removed from the main pipeline; "standard" is kept as an ablation.
+  normalization: none
+  ablation_normalization: standard
 window:
   size_seconds: 10
   fallback_size_samples: 1000
   overlap: 0.5
+modal:
+  test_types: [avt]          # output-only FDD is valid for ambient tests; FVT spectra are dominated by shaker lines
+  baseline_scenario: 1
+  nperseg: 4096              # 40.96 s segments, 0.0244 Hz resolution at 100 Hz
+  fmin: 1.5
+  fmax: 15.0
+  peak_prominence: 0.3       # decades of the normalised first singular value
+  max_modes: 5
+  min_mac: 0.8
+  reference_sensors: [R1V, R2L, R2T, R2V, R3V]
 bocpd:
   feature: rms
   hazard_rate: 0.01
   threshold: 0.80
   max_run_length: 500
+sequence_bocpd:
+  features: [f1, f2, f3, f4]
+  hazard_rates: [0.02, 0.05, 0.111]
+  primary_hazard_rate: 0.05
+  # kappa0 = prior precision of a segment mean relative to the baseline std (Normal-Gamma prior).
+  # 1.0 (default) keeps new segments within ~1 sigma of the baseline; 0.01 is a vague prior (~10 sigma).
+  kappa0_values: [1.0, 0.1, 0.01]
+  primary_kappa0: 0.01
+  tolerance_records: 4
+  baseline_records: 9       # scenario 01 (9 AVT setups) used to standardise features
+cusum:
+  k: 0.5
+  h: [4.0, 5.0, 8.0]
+  primary_h: 5.0
+  warmup: 3
 model:
   algorithm: xgboost
   n_estimators: 300
@@ -40,10 +71,20 @@ model:
   random_state: 42
   test_size: 0.25
   min_samples_for_training: 20
+evaluation:
+  seeds: [0, 1, 2]
+  group_kfold_splits: 5
+  bootstrap_iterations: 2000
+  bootstrap_seed: 12345
+  classification_test: avt
+  window_stride: 2          # every 2nd window of the 50%-overlap grid -> non-overlapping 10 s windows
+  svm_max_train_rows: 20000
+  risk_min_grouped_auc: 0.7
 risk:
   bocpd_weight: 0.3
   ml_weight: 0.5
   attribution_weight: 0.2
+  attribution_requires_change: true   # A enters as A * max(B, M): SHAP only prioritises sensors once a change is evident
   thresholds: {medium: 0.35, high: 0.60, critical: 0.80}
 dashboard:
   refresh_interval: 1.0

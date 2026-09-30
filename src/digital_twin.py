@@ -19,7 +19,9 @@ def build_digital_twin(sensor_status: pd.DataFrame | None = None) -> go.Figure:
     fig.add_trace(go.Scatter(x=[0, 100], y=[3, 3], mode="lines", line={"width": 14, "color": "#617181"}, name="Bridge deck"))
     for px in (15, 50, 85):
         fig.add_trace(go.Scatter(x=[px, px], y=[0, 3], mode="lines", line={"width": 9, "color": "#86979c"}, showlegend=False))
-    fig.add_trace(go.Scatter(x=layout.x, y=layout.y, mode="markers+text", text=layout.sensor, textposition="top center",
+    many = len(layout) > 12  # dense layouts: labels on hover only, otherwise they overlap
+    fig.add_trace(go.Scatter(x=layout.x, y=layout.y, mode="markers" if many else "markers+text", text=layout.sensor,
+                             textposition="top center",
                              marker={"size": 16, "color": [colors.get(str(s), "#95a5a6") for s in layout.get("status", "NORMAL")], "line": {"width": 2, "color": "white"}},
                              customdata=layout[[c for c in ("status", "change_probability", "importance_score", "risk_level") if c in layout]],
                              hovertemplate="Sensor %{text}<extra></extra>", name="Sensors"))

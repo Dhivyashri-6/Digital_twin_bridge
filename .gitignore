@@ -6,8 +6,8 @@ __pycache__/
 venv/
 .env
 models/*.pkl
-data/processed/*.csv
-data/processed/*.json
+data/processed/
+results/
 results/figures/
 results/metrics/
 results/shap/
